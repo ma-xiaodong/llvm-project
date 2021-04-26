@@ -380,6 +380,15 @@ def CSE : Pass<"cse"> {
   ];
 }
 
+def HigherOrderPolyhedralOpt : FunctionPass<"hopt"> {
+  let summary = "Run higher order polyhedral optimization";
+  let constructor = "mlir::createHigherOrderPolyhedralOptPass()";
+  let options = [
+    Option<"clTile", "tile", "bool", /*default=*/"true", "Perform auto-tiling">,
+    Option<"clUnroll", "unroll", "bool", /*default=*/"true", "Perform unroll and unroll-and-jam">,
+  ];  
+}
+
 def Inliner : Pass<"inline"> {
   let summary = "Inline function calls";
   let constructor = "mlir::createInlinerPass()";

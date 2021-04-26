@@ -8,6 +8,7 @@ add_mlir_library(MLIRTransforms
   Bufferize.cpp
   Canonicalizer.cpp
   CSE.cpp
+  HigherOrderPolyhedralOpt.cpp
   Inliner.cpp
   LocationSnapshot.cpp
   LoopCoalescing.cpp
