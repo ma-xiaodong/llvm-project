@@ -31,7 +31,7 @@ func @matmul(%arg0 : memref<2088x2048xf32>, %arg1 : memref<2048x2048xf32>, %arg2
 	affine.store %4, %arg2[%i, %j] : memref<2088x2048xf32>
       }
     }
-  } {class = "matmul", M = 2088, N = 2048, K = 2048, L1_C = 32, L2_C = 256, L3_C = 12288}
+  } {class = "matmul", M = 2088, N = 2048, K = 2048, L1S = 32, L2S = 256, L3S = 12288, RS=16}
   return
 }
 func private @print_memref_f32(memref<*xf32>)
