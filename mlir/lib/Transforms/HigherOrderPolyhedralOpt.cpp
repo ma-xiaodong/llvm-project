@@ -32,8 +32,53 @@ static unsigned getMatmulOptParameter(Operation *op, StringRef name) {
   IntegerAttr attr = op->getAttrOfType<IntegerAttr>(name);
 
   assert(attr && "optimization parameter not found");
-
   return attr.getValue().getSExtValue();
+}
+
+// Compute the tile size from the matrix and architecture params:
+// 1. M: height of matrix A;          2. N: width of matrix B;
+// 3. K: width of A, height of B;     4. L1S: L1 cache size;
+// 5. L2S: L2 cache size;             6. L3S: L3 cache size
+// 7. RS: register number of the cpu'
+// All the above numbers are times of K
+//
+// The variables need to be computed:
+// kc : tile size along K dimension
+// mc : tile size along M dimension
+// nr : tile size along N dimension
+// mr : tile size within mc
+//
+// The constraints they must satisfied:
+// 0 <= kc * N <= L3S          (1)
+// 0 <= mc * kc <= L2S         (2)
+// 0 <= (mr + nr) * kc <= L1S  (3)
+// mr + nr = RS                (4)
+// 0 <= kc <= K                (5)
+// 0 <= mc <= M                (6)
+// 0 <= mr <= mc               (7)
+// 0 <= nr <= N                (8)
+// K % kc = 0                  (9)
+// N % nr = 0                  (10)
+// M % mc = 0                  (11)
+// mc % mr = 0                 (12)
+
+static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
+  // The order of computed size: kc, 
+  SmallVector<unsigned, 4> computedSize;
+  unsigned M, N, K, RS, L1S, L2S, L3S;
+  
+  M = getMatmulOptParameter(*forOp, "M");
+  N = getMatmulOptParameter(*forOp, "N");
+  K = getMatmulOptParameter(*forOp, "K");
+  L1S = getMatmulOptParameter(*forOp, "L1S");
+  L2S = getMatmulOptParameter(*forOp, "L2S");
+  L3S = getMatmulOptParameter(*forOp, "L3S");
+  RS = getMatmulOptParameter(*forOp, "RS");
+
+  unsigned upper_kc1 = L1S / RS;
+  LLVM_DEBUG(llvm::dbgs() << "First upper of KC: " << upper_kc1 << "\n");
+
+  return computedSize;
 }
 
 void HigherOrderPolyhedralOpt::runOnFunction() {
@@ -57,7 +102,7 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
       }
       if (polyClass.getValue().equals("matmul")) {
         getPerfectlyNestedLoops(band, forOp);
-	break;
+        break;
       }
     }
   }
@@ -68,19 +113,8 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
   }
   
   assert(band.size() == 3 && "matmul has at most 3 loops");
-
-  unsigned l1CacheSize, l2CacheSize, l3CacheSize, M, N, K;
-
-  l1CacheSize = getMatmulOptParameter(band[0], "L1_C");
-  l2CacheSize = getMatmulOptParameter(band[0], "L2_C");
-  l3CacheSize = getMatmulOptParameter(band[0], "L3_C");
-  M = getMatmulOptParameter(band[0], "M");
-  N = getMatmulOptParameter(band[0], "N");
-  K = getMatmulOptParameter(band[0], "K");
-
   if (clTile) {
-    // compute the tile param form machine param
-    unsigned kc, mc, mr, nr;
+    SmallVector<unsigned, 4> tileSize = computerTileSize(&band[0]);
   }
   return;
 }
