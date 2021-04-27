@@ -15,7 +15,8 @@
 #include <unordered_map>
 #include <iostream>
 
-#define DEBUG_TYPE "hopt"
+#define DEBUG_TYPE    "hopt"
+#define CACHE_UNIT    1024
 
 using namespace mlir;
 
@@ -143,8 +144,24 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
     nr = rTileStack[0].second;
   }
   LLVM_DEBUG(llvm::dbgs() << "final (mr, nr): " << "(" << mr << ", " << nr << ")\n");
+  // check nr satisfies contition (8)
+  assert(nr <= N && "N is too small");
 
-  return computedSize;
+
+  // Compute kc. First use (1) and (3) to get the max value. 
+  // Then try to satisfy (9)
+  kc = L1S * CACHE_UNIT / ((mr + nr) * byteWidth);
+  // if kc too big to hold kc * N in L3S, warning.
+  if (kc * N * byteWidth > L3S * CACHE_UNIT) {
+    LLVM_DEBUG(llvm::dbgs() << "L3S is not enough in tiling");
+  }
+  assert(kc <= K && "K is too small");
+
+  // Compute mc using constraint (2)
+  mc = L2S * CACHE_UNIT / (kc * byteWidth);
+  assert(mc <= M && "M is too small");
+
+  return computedSize = {kc, mc, mr, nr};
 }
 
 void HigherOrderPolyhedralOpt::runOnFunction() {
@@ -181,6 +198,9 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
   assert(band.size() == 3 && "matmul has at most 3 loops");
   if (clTile) {
     SmallVector<unsigned, 4> tileSize = computerTileSize(&band[0]);
+    LLVM_DEBUG(llvm::dbgs() << "kc, mc, mr, nr: "
+               << tileSize[0] << ", " << tileSize[1] << ", " 
+	       << tileSize[2] << ", " << tileSize[3] << "\n");
   }
   return;
 }
