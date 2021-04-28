@@ -41,8 +41,8 @@ func @main() {
 
 func @matmul(%arg0 : memref<2088x2048xf32>, %arg1 : memref<2048x2048xf32>, %arg2 : memref<2088x2048xf32>) {
   affine.for %i = 0 to 2088 {
-    affine.for %j = 0 to 2048 {
-      affine.for %k = 0 to 2048 {
+    affine.for %k = 0 to 2048 {
+      affine.for %j = 0 to 2048 {
         %0 = affine.load %arg0[%i, %k] : memref<2088x2048xf32>
         %1 = affine.load %arg1[%k, %j] : memref<2048x2048xf32>
         %2 = affine.load %arg2[%i, %j] : memref<2088x2048xf32>
