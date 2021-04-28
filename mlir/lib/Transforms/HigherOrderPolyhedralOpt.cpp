@@ -117,11 +117,11 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
   // There maybe more then one element in rTileStack, choose the one which
   // minimize |mr-nr|
   if (rTileStack.size() > 1) {
-    unsigned oldDiff, newDiff, tmpMr, tmpNr;
+    unsigned oldSum, newSum, tmpMr, tmpNr;
 
     mr = rTileStack[rTileStack.size() - 1].first;
     nr = rTileStack[rTileStack.size() - 1].second;
-    oldDiff = (mr > nr)? (mr -nr) : (nr - mr);
+    oldSum = mr + nr;
     rTileStack.pop_back();
     LLVM_DEBUG(llvm::dbgs() << "(mr, nr): " << "(" << mr << ", " << nr << ")\n");
 
@@ -130,12 +130,12 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
       tmpNr = rTileStack[rTileStack.size() - 1].second;
       LLVM_DEBUG(llvm::dbgs() << "(mr, nr): " << "(" << tmpMr << ", " << tmpNr << ")\n");
 
-      newDiff = (tmpMr > tmpNr) ? (tmpMr - tmpNr) : (tmpNr - tmpMr);
+      newSum = tmpMr + tmpNr;
 
-      if (newDiff < oldDiff) {
+      if (newSum < oldSum) {
         mr = tmpMr;
 	nr = tmpNr;
-	oldDiff = newDiff;
+	oldSum = newSum;
       }
       rTileStack.pop_back();
     }
@@ -148,8 +148,8 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
   assert(nr <= N && "N is too small");
 
 
-  // Compute kc. First use (1) and (3) to get the max value. 
-  // Then try to satisfy (9)
+  // Compute kc. First use (3) to get the max value, then check if it satifies
+  // (1). Then check constraints (5).
   kc = L1S * CACHE_UNIT / ((mr + nr) * byteWidth);
   // if kc too big to hold kc * N in L3S, warning.
   if (kc * N * byteWidth > L3S * CACHE_UNIT) {
@@ -159,7 +159,16 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
 
   // Compute mc using constraint (2)
   mc = L2S * CACHE_UNIT / (kc * byteWidth);
+  if (mc < mr) {
+    // this condition looks impossible
+    mc = mr;
+  }
   assert(mc <= M && "M is too small");
+
+  // Try to satisfy constraint (12), do not care (9)-(11)
+  while (mc % mr) {
+    mc--;
+  }
 
   return computedSize = {kc, mc, mr, nr};
 }
