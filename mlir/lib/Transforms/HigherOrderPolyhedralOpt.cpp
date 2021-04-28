@@ -182,8 +182,8 @@ void HigherOrderPolyhedralOpt::runOnFunction() {
 }
 
 void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
-  SmallVector<AffineForOp, 3> band;
   StringAttr polyClass;
+  SmallVector<AffineForOp, 3> band;
 
   for (auto &op : *block) {
     if (auto forOp = dyn_cast<AffineForOp>(op)) {
@@ -206,10 +206,62 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
   
   assert(band.size() == 3 && "matmul has at most 3 loops");
   if (clTile) {
+    // Original loop
+    // Result of first tiling
+    SmallVector<AffineForOp, 6> tiledNest0;
+    // Result of second tiling
+    SmallVector<AffineForOp, 7> tiledNest1;
+    unsigned kc, mc, mr, nr;
+
     SmallVector<unsigned, 4> tileSize = computerTileSize(&band[0]);
     LLVM_DEBUG(llvm::dbgs() << "kc, mc, mr, nr: "
                << tileSize[0] << ", " << tileSize[1] << ", " 
 	       << tileSize[2] << ", " << tileSize[3] << "\n");
+
+    kc = tileSize[0]; mc = tileSize[1];
+    mr = tileSize[2]; nr = tileSize[3];
+
+    // Dimension should be tiled twice.
+    if (failed(tilePerfectlyNested(band, {mc, nr, kc}, &tiledNest0))) {
+      LLVM_DEBUG(llvm::dbgs() << "failed during first tiling");
+    }
+    // Tile mc further
+    if (failed(tilePerfectlyNested(tiledNest0[3], 
+                                   mr, &tiledNest1))) {
+      LLVM_DEBUG(llvm::dbgs() << "failed during second tiling");
+    }
+    LLVM_DEBUG(llvm::dbgs() << "Finally tiled: " << tiledNest1.size() << "\n");
+
+    // After tiling, interchange the loops. 
+    // The original order of loop vars are:
+    // out-mc, out-nr, out-kc, inner-mc, inner-mr, inner-nr, inner-kc
+    // The inchanged order of loop vars should be:
+    // out-kc, out-mc, out-nr, inner-mc, inner-kc, inner-nr, inner-mr
+    // Interchange inner-kc with inner-mr
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    LLVM_DEBUG(llvm::dbgs() << "Finally total: " << tiledNest1.size() << "\n");
+    interchangeLoops(tiledNest1[5], tiledNest1[6]);
+
+    // Interchange inner-kc with inner-mr
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    interchangeLoops(tiledNest1[4], tiledNest1[5]);
+
+    // Interchange inner-mr with inner-nr
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    interchangeLoops(tiledNest1[5], tiledNest1[6]);
+
+    // Interchange outer-kc with outer-nr
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    interchangeLoops(tiledNest1[1], tiledNest1[2]);
+
+    // Interchange outer-kc with outer-mc
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    interchangeLoops(tiledNest1[0], tiledNest1[1]);
   }
   return;
 }
