@@ -46,9 +46,9 @@ func @matmul(%arg0 : memref<2088x2048xf32>, %arg1 : memref<2048x2048xf32>, %arg2
         %0 = affine.load %arg0[%i, %k] : memref<2088x2048xf32>
         %1 = affine.load %arg1[%k, %j] : memref<2048x2048xf32>
         %2 = affine.load %arg2[%i, %j] : memref<2088x2048xf32>
-	%3 = mulf %0, %1 : f32
-	%4 = addf %3, %2 : f32
-	affine.store %4, %arg2[%i, %j] : memref<2088x2048xf32>
+        %3 = mulf %0, %1 : f32
+        %4 = addf %3, %2 : f32
+        affine.store %4, %arg2[%i, %j] : memref<2088x2048xf32>
       }
     }
   } {class = "matmul", M = 2088, N = 2048, K = 2048, L1S = 32, L2S = 256, L3S = 12288, RS=16}
