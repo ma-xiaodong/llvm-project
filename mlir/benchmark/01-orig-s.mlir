@@ -16,7 +16,7 @@ func @main() {
   %t_end = call @rtclock() : () -> (f64)
 
   %pC = memref.cast %C : memref<2088x2048xf32> to memref<*xf32>
-  //call @print_memref_f32(%pC) : (memref<*xf32>) -> ()
+  call @print_memref_f32(%pC) : (memref<*xf32>) -> ()
 
   %c0 = constant 0 : index
   %c1 = constant 1 : index
