@@ -1,0 +1,37 @@
+loop order: ko, io, jo, ki, ii, ji
+
+            k          i         j         perf(GFLOPS)
+tile size   128        16        128       27.51
+            128        8         128       23.04
+            128        4         128       26.27
+            128        16        256       25.08
+            128        8         256       26.64
+            128        4         256       35.12
+            256        16        128       27.93
+            256        8         128       22.89
+            256        4         128       26.35
+            256        16        256       24.78
+            256        8         256       26.79
+            256        4         256       36.42
+            256        4         64        18.64
+            256        4         128       25.64
+            256        4         512       36.48
+            256        2         512       28.66
+
+CPU info:
+LEVEL1_ICACHE_SIZE                 32768
+LEVEL1_ICACHE_ASSOC                8
+LEVEL1_ICACHE_LINESIZE             64
+LEVEL1_DCACHE_SIZE                 49152
+LEVEL1_DCACHE_ASSOC                12
+LEVEL1_DCACHE_LINESIZE             64
+LEVEL2_CACHE_SIZE                  524288
+LEVEL2_CACHE_ASSOC                 8
+LEVEL2_CACHE_LINESIZE              64
+LEVEL3_CACHE_SIZE                  6291456
+LEVEL3_CACHE_ASSOC                 12
+LEVEL3_CACHE_LINESIZE              64
+LEVEL4_CACHE_SIZE                  0
+LEVEL4_CACHE_ASSOC                 0
+LEVEL4_CACHE_LINESIZE              0
+
