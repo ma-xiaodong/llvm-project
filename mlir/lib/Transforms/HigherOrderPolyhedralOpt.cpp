@@ -66,7 +66,7 @@ static unsigned getMatmulOptParameter(Operation *op, StringRef name) {
 // M % mc = 0                                       (11)
 // mc % mr = 0                                      (12)
 
-static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
+static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
   // The order of computed size: kc, 
   SmallVector<unsigned, 4> computedSize;
   unsigned M, N, K, RS, L1S, L2S, L3S, byteWidth;
@@ -85,68 +85,56 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
     byteWidth = memrefType.getElementType().getIntOrFloatBitWidth() / 8;
   });
 
-  unsigned vecSize = vecBytes / byteWidth;
+  // unsigned vecSize = vecBytes / byteWidth;
+  unsigned vecSize = 1;
   unsigned kc, mc, mr, nr;
 
   // Compute mr and nr. First find all the pairs (mr, nr) which satifies (4) 
-  std::vector<std::pair<unsigned, unsigned>> rTileStack;
-  nr = vecSize;
-  mr = (RS - 1) / (1 + nr / vecSize);
-  rTileStack.push_back(std::make_pair(mr, nr));
-  {
-    unsigned oldDiff, newDiff;
-    oldDiff = RS - (mr + 1 + mr * nr / vecSize);
-
-    while(mr > 0 && nr <= N) {
-      nr += vecSize;
-      mr = (RS - 1) / (1 + nr / vecSize);
-      newDiff = RS - (mr + 1 + mr * nr / vecSize);
-
-      if (newDiff < oldDiff) {
-        while(rTileStack.size()) {
-          rTileStack.pop_back();
-        }
-        rTileStack.push_back(std::make_pair(mr, nr));
-        oldDiff = newDiff;
-      } else if (newDiff == oldDiff) {
-        rTileStack.push_back(std::make_pair(mr, nr));
-      }
-    }
+  // assign mr suitable from 2
+  std::vector<std::pair<unsigned, unsigned>> rTmpStack, rFinalStack;
+  mr = 2;
+  nr = (RS - 1 - mr) * vecSize / mr;
+  // add all possible (mr, nr) to rTmpStack
+  while (nr >= vecSize) {
+    rTmpStack.push_back(std::make_pair(mr, nr));
+    mr++;
+    nr = (RS - 1 - mr) * vecSize / mr;
   }
 
-  // There maybe more then one element in rTileStack, choose the one which
-  // minimize |mr-nr|
-  if (rTileStack.size() > 1) {
-    unsigned oldSum, newSum, tmpMr, tmpNr;
+  // choose mr that satisfies M % mr == 0
+  for (unsigned i = 0; i < rTmpStack.size(); i++) {
+    mr = rTmpStack[i].first;
+    if (M % mr == 0) {
+      mr = rTmpStack[i].first;
+      nr = rTmpStack[i].second;
+      rFinalStack.push_back(std::make_pair(mr, nr));
+    }
+  }
+  // if M % mr != 0, reassign mr
+  if (rFinalStack.size() == 0) {
+    mr = 2;
+    nr = (RS - 1 - mr) * vecSize / mr;
+  } else {
+    // use (4) to choose the pair whose result is colsest to RS
+    mr = rFinalStack[0].first;
+    nr = rFinalStack[0].second;
+    int diff = RS - (mr + 1 + mr * nr / vecSize);
 
-    mr = rTileStack[rTileStack.size() - 1].first;
-    nr = rTileStack[rTileStack.size() - 1].second;
-    oldSum = mr + nr;
-    rTileStack.pop_back();
-    LLVM_DEBUG(llvm::dbgs() << "(mr, nr): " << "(" << mr << ", " << nr << ")\n");
+    for (unsigned i = 1; i < rFinalStack.size(); i++) {
+      int tmpMr = rFinalStack[i].first;
+      int tmpNr = rFinalStack[i].second;
+      int tmpDiff = RS - (tmpMr + 1 + tmpMr * tmpNr / vecSize);
 
-    while (rTileStack.size()) {
-      tmpMr = rTileStack[rTileStack.size() - 1].first;
-      tmpNr = rTileStack[rTileStack.size() - 1].second;
-      LLVM_DEBUG(llvm::dbgs() << "(mr, nr): " << "(" << tmpMr << ", " << tmpNr << ")\n");
-
-      newSum = tmpMr + tmpNr;
-
-      if (newSum < oldSum) {
+      if (diff > tmpDiff) {
         mr = tmpMr;
 	nr = tmpNr;
-	oldSum = newSum;
       }
-      rTileStack.pop_back();
     }
-  } else {
-    mr = rTileStack[0].first;
-    nr = rTileStack[0].second;
   }
+
   LLVM_DEBUG(llvm::dbgs() << "final (mr, nr): " << "(" << mr << ", " << nr << ")\n");
   // check nr satisfies contition (8)
   assert(nr <= N && "N is too small");
-
 
   // Compute kc. First use (3) to get the max value, then check if it satifies
   // (1). Then check constraints (5).
@@ -169,7 +157,6 @@ static SmallVector<unsigned, 4> computerTileSize(AffineForOp *forOp) {
   while (mc % mr) {
     mc--;
   }
-
   return computedSize = {kc, mc, mr, nr};
 }
 
@@ -203,8 +190,8 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     // Unrelated loop
     return;
   }
-  
   assert(band.size() == 3 && "matmul has at most 3 loops");
+
   if (clTile) {
     // Original loop
     // Result of first tiling
@@ -213,56 +200,68 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     SmallVector<AffineForOp, 7> tiledNest1;
     unsigned kc, mc, mr, nr;
 
-    SmallVector<unsigned, 4> tileSize = computerTileSize(&band[0]);
-    LLVM_DEBUG(llvm::dbgs() << "kc, mc, mr, nr: "
-               << tileSize[0] << ", " << tileSize[1] << ", " 
-	       << tileSize[2] << ", " << tileSize[3] << "\n");
+    SmallVector<unsigned, 4> tileSize = computeTileSize(&band[0]);
+    llvm::dbgs() << "kc, mc, mr, nr: "
+                 << tileSize[0] << ", " << tileSize[1] << ", " 
+	         << tileSize[2] << ", " << tileSize[3] << "\n";
 
     kc = tileSize[0]; mc = tileSize[1];
     mr = tileSize[2]; nr = tileSize[3];
 
     // Dimension should be tiled twice.
-    if (failed(tilePerfectlyNested(band, {mc, nr, kc}, &tiledNest0))) {
+    if (failed(tilePerfectlyNested(band, {mr, nr, kc}, &tiledNest1))) {
       LLVM_DEBUG(llvm::dbgs() << "failed during first tiling");
     }
     // Tile mc further
-    if (failed(tilePerfectlyNested(tiledNest0[3], 
-                                   mr, &tiledNest1))) {
+    if (failed(tilePerfectlyNested(tiledNest1[0], 
+                                   mc / mr, &tiledNest0))) {
       LLVM_DEBUG(llvm::dbgs() << "failed during second tiling");
     }
     LLVM_DEBUG(llvm::dbgs() << "Finally tiled: " << tiledNest1.size() << "\n");
 
     // After tiling, interchange the loops. 
     // The original order of loop vars are:
-    // out-mc, out-nr, out-kc, inner-mc, inner-mr, inner-nr, inner-kc
+    // ioo, ioi, jo, ko, ii, ji, ki
     // The inchanged order of loop vars should be:
-    // out-kc, out-mc, out-nr, inner-mc, inner-kc, inner-nr, inner-mr
-    // Interchange inner-kc with inner-mr
+    // ko, ioo, jo, ioi, ki, ji, ii
+
+    // Interchange ji with ki
     tiledNest1.clear();
     getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
     LLVM_DEBUG(llvm::dbgs() << "Finally total: " << tiledNest1.size() << "\n");
     interchangeLoops(tiledNest1[5], tiledNest1[6]);
 
-    // Interchange inner-kc with inner-mr
+    // Interchange ii with ki
     tiledNest1.clear();
     getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
     interchangeLoops(tiledNest1[4], tiledNest1[5]);
 
-    // Interchange inner-mr with inner-nr
+    // Interchange ii with ji
     tiledNest1.clear();
     getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
     interchangeLoops(tiledNest1[5], tiledNest1[6]);
 
-    // Interchange outer-kc with outer-nr
+    // Interchange ioi with jo
     tiledNest1.clear();
     getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
     interchangeLoops(tiledNest1[1], tiledNest1[2]);
 
-    // Interchange outer-kc with outer-mc
+    // Interchange ioi with ko
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    interchangeLoops(tiledNest1[2], tiledNest1[3]);
+
+    // Interchange jo with ko
+    tiledNest1.clear();
+    getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
+    interchangeLoops(tiledNest1[1], tiledNest1[2]);
+
+    // Interchange ioo with ko
     tiledNest1.clear();
     getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
     interchangeLoops(tiledNest1[0], tiledNest1[1]);
   }
+
   return;
 }
 
