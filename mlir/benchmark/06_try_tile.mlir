@@ -1,6 +1,6 @@
 #map0 = affine_map<(d0) -> (d0)>                                                
-#map1 = affine_map<(d0) -> (d0 + 256)>
-#map2 = affine_map<(d0) -> (d0 + 8, 2088)>
+#map1 = affine_map<(d0) -> (d0 + 1024)>
+#map2 = affine_map<(d0) -> (d0 + 4, 2088)>
 #map3 = affine_map<(d0) -> (d0 + 512)>
 
 func @main() {
@@ -45,8 +45,8 @@ func @main() {
 }
 
 func @matmul(%arg0 : memref<2088x2048xf32>, %arg1 : memref<2048x2048xf32>, %arg2 : memref<2088x2048xf32>) {
-  affine.for %k = 0 to 2048 step 256 {
-    affine.for %i = 0 to 2088 step 8 {
+  affine.for %k = 0 to 2048 step 1024 {
+    affine.for %i = 0 to 2088 step 4 {
       affine.for %j = 0 to 2048 step 512 {
         affine.for %kk = #map0(%k) to #map1(%k) {
           affine.for %ii = #map0(%i) to min #map2(%i) {
