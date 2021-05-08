@@ -1,5 +1,5 @@
 #map0 = affine_map<(d0) -> (d0)>                                                
-#map1 = affine_map<(d0) -> (d0 + 1024)>
+#map1 = affine_map<(d0) -> (d0 + 128)>
 #map2 = affine_map<(d0) -> (d0 + 4, 2088)>
 #map3 = affine_map<(d0) -> (d0 + 512)>
 
@@ -12,7 +12,7 @@ func @main() {
   linalg.fill(%A, %cf1) : memref<2088x2048xf32>, f32
   linalg.fill(%B, %cf1) : memref<2048x2048xf32>, f32
 
-  %reps = constant 5 : index
+  %reps = constant 1 : index
   %t_start = call @rtclock() : () -> (f64)
   affine.for %ti = 0 to %reps {
     linalg.fill(%C, %cf1) : memref<2088x2048xf32>, f32
@@ -45,7 +45,7 @@ func @main() {
 }
 
 func @matmul(%arg0 : memref<2088x2048xf32>, %arg1 : memref<2048x2048xf32>, %arg2 : memref<2088x2048xf32>) {
-  affine.for %k = 0 to 2048 step 1024 {
+  affine.for %k = 0 to 2048 step 128 {
     affine.for %i = 0 to 2088 step 4 {
       affine.for %j = 0 to 2048 step 512 {
         affine.for %kk = #map0(%k) to #map1(%k) {
@@ -56,10 +56,10 @@ func @matmul(%arg0 : memref<2088x2048xf32>, %arg1 : memref<2048x2048xf32>, %arg2
               %2 = affine.load %arg2[%ii, %jj] : memref<2088x2048xf32>
               %3 = mulf %0, %1 : f32
               %4 = addf %3, %2 : f32
-	          affine.store %4, %arg2[%ii, %jj] : memref<2088x2048xf32>
-	        }
-	      }
+	      affine.store %4, %arg2[%ii, %jj] : memref<2088x2048xf32>
 	    }
+	  }
+	}
       }
     }
   } {class = "matmul", M = 2088, N = 2048, K = 2048, L1S = 32, L2S = 256, L3S = 12288, RS=16}
