@@ -384,8 +384,9 @@ def HigherOrderPolyhedralOpt : FunctionPass<"hopt"> {
   let summary = "Run higher order polyhedral optimization";
   let constructor = "mlir::createHigherOrderPolyhedralOptPass()";
   let options = [
-    Option<"clTile", "tile", "bool", /*default=*/"true", "Perform auto-tiling">,
-    Option<"clUnroll", "unroll", "bool", /*default=*/"true", "Perform unroll and unroll-and-jam">,
+    Option<"clTile", "tile", "bool", /*default=*/"false", "Perform auto-tiling">,
+    Option<"clUnroll", "unroll", "bool", /*default=*/"false", "Perform unroll and unroll-and-jam">,
+    Option<"clCopy", "copy", "bool", /*default=*/"false", "Copy data from big area to small area">,
   ];  
 }
 
