@@ -208,7 +208,11 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     SmallVector<unsigned, 4> tileSize = computeTileSize(&band[0]);
     LLVM_DEBUG(llvm::dbgs() << "kc, mc, mr, nr: "
                             << tileSize[0] << ", " << tileSize[1] << ", " 
+<<<<<<< HEAD
                             << tileSize[2] << ", " << tileSize[3] << "\n");
+=======
+	                    << tileSize[2] << ", " << tileSize[3] << "\n");
+>>>>>>> e4db6cedb2de74431db14c5365d0bcb731afa561
 
     kc = tileSize[0]; mc = tileSize[1];
     mr = tileSize[2]; nr = tileSize[3];
