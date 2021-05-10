@@ -53,18 +53,18 @@ static unsigned getMatmulOptParameter(Operation *op, StringRef name) {
 // mr : tile size within mc
 //
 // The constraints they must satisfied:
-// 0 <= kc * N * byteWidth <= L3S                   (1)
-// 0 <= mc * kc * byteWidth <= L2S                  (2)
-// 0 <= (mr + nr) * kc * byteWidth <= L1S           (3)
-// mr + 1 + mr * nr / (vecBytes / byteWidth) = RS   (4)
-// 0 <= kc <= K                                     (5)
-// 0 <= mc <= M                                     (6)
-// 0 <= mr <= mc                                    (7)
-// 0 <= nr <= N                                     (8)
-// K % kc = 0                                       (9)
-// N % nr = 0                                       (10)
-// M % mc = 0                                       (11)
-// mc % mr = 0                                      (12)
+// 0 <= (mc * kc + kc * N + mc * N) * byteWidth <= L3S          (1)
+// 0 <= (mc * kc + kc * nr + mc * nr)* byteWidth <= L2S         (2)
+// 0 <= ((mr + nr) * kc + mr * nr) * byteWidth <= L1S           (3)
+// mr + 1 + mr * nr / (vecBytes / byteWidth) = RS               (4)
+// 0 <= kc <= K                                                 (5)
+// 0 <= mc <= M                                                 (6)
+// 0 <= mr <= mc                                                (7)
+// 0 <= nr <= N                                                 (8)
+// K % kc = 0                                                   (9)
+// N % nr = 0                                                   (10)
+// M % mc = 0                                                   (11)
+// mc % mr = 0                                                  (12)
 
 static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
   // The order of computed size: kc, 
@@ -85,8 +85,8 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
     byteWidth = memrefType.getElementType().getIntOrFloatBitWidth() / 8;
   });
 
-  // unsigned vecSize = vecBytes / byteWidth;
-  unsigned vecSize = 1;
+  unsigned vecSize = vecBytes / byteWidth;
+  //unsigned vecSize = 1;
   unsigned kc, mc, mr, nr;
 
   // Compute mr and nr. First find all the pairs (mr, nr) which satifies (4) 
@@ -104,9 +104,8 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
   // choose mr that satisfies M % mr == 0
   for (unsigned i = 0; i < rTmpStack.size(); i++) {
     mr = rTmpStack[i].first;
-    if (M % mr == 0) {
-      mr = rTmpStack[i].first;
-      nr = rTmpStack[i].second;
+    nr = rTmpStack[i].second;
+    if (M % mr == 0 && nr % vecSize == 0) {
       rFinalStack.push_back(std::make_pair(mr, nr));
     }
   }
@@ -128,6 +127,7 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
       if (diff > tmpDiff) {
         mr = tmpMr;
 	nr = tmpNr;
+	diff = tmpDiff;
       }
     }
   }
@@ -138,25 +138,23 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
 
   // Compute kc. First use (3) to get the max value, then check if it satifies
   // (1). Then check constraints (5).
-  kc = L1S * CACHE_UNIT / ((mr + nr) * byteWidth);
-  // if kc too big to hold kc * N in L3S, warning.
-  if (kc * N * byteWidth > L3S * CACHE_UNIT) {
-    LLVM_DEBUG(llvm::dbgs() << "L3S is not enough in tiling");
-  }
+  kc = (L1S * CACHE_UNIT / byteWidth - mr * nr) / (mr + nr);
   assert(kc <= K && "K is too small");
 
   // Compute mc using constraint (2)
-  mc = L2S * CACHE_UNIT / (kc * byteWidth);
+  // mc = L2S * CACHE_UNIT / (kc * byteWidth);
+  mc = (L2S * CACHE_UNIT / byteWidth - kc * nr) / (nr + kc);
   if (mc < mr) {
     // this condition looks impossible
     mc = mr;
   }
   assert(mc <= M && "M is too small");
 
-  // Try to satisfy constraint (12), do not care (9)-(11)
-  while (mc % mr) {
-    mc--;
+  // Check whether L3 is enough
+  if ((mc * kc + kc * N + mc * N) * byteWidth > L3S * CACHE_UNIT) {
+    llvm::dbgs() << "Warining L3 Cache is small?\n";
   }
+
   return computedSize = {kc, mc, mr, nr};
 }
 
