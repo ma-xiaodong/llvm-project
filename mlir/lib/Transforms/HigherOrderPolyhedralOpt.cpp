@@ -152,7 +152,7 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
 
   // Check whether L3 is enough
   if ((mc * kc + kc * N + mc * N) * byteWidth > L3S * CACHE_UNIT) {
-    llvm::dbgs() << "Warining L3 Cache is small?\n";
+    LLVM_DEBUG(llvm::dbgs() << "Warining L3 Cache is small?\n");
   }
 
   return computedSize = {kc, mc, mr, nr};
@@ -168,7 +168,8 @@ void HigherOrderPolyhedralOpt::runOnFunction() {
 
 void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
   StringAttr polyClass;
-  SmallVector<AffineForOp, 3> band;
+  SmallVector<AffineForOp, 7> band;
+  unsigned kc, mc, mr, nr;
 
   for (auto &op : *block) {
     if (auto forOp = dyn_cast<AffineForOp>(op)) {
@@ -190,18 +191,18 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
   }
   assert(band.size() == 3 && "matmul has at most 3 loops");
 
+  // Tiling the loops in matrix multiplication
   if (clTile) {
     // Original loop
     // Result of first tiling
-    SmallVector<AffineForOp, 6> tiledNest0;
+    SmallVector<AffineForOp, 7> tiledNest0;
     // Result of second tiling
     SmallVector<AffineForOp, 7> tiledNest1;
-    unsigned kc, mc, mr, nr;
 
     SmallVector<unsigned, 4> tileSize = computeTileSize(&band[0]);
-    llvm::dbgs() << "kc, mc, mr, nr: "
-                 << tileSize[0] << ", " << tileSize[1] << ", " 
-	         << tileSize[2] << ", " << tileSize[3] << "\n";
+    LLVM_DEBUG(llvm::dbgs() << "kc, mc, mr, nr: "
+                            << tileSize[0] << ", " << tileSize[1] << ", " 
+	                    << tileSize[2] << ", " << tileSize[3] << "\n");
 
     kc = tileSize[0]; mc = tileSize[1];
     mr = tileSize[2]; nr = tileSize[3];
@@ -215,7 +216,6 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
                                    mc / mr, &tiledNest0))) {
       LLVM_DEBUG(llvm::dbgs() << "failed during second tiling");
     }
-    LLVM_DEBUG(llvm::dbgs() << "Finally tiled: " << tiledNest1.size() << "\n");
 
     // After tiling, interchange the loops. 
     // The original order of loop vars are:
@@ -258,6 +258,24 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     tiledNest1.clear();
     getPerfectlyNestedLoops(tiledNest1, tiledNest0[0]);
     interchangeLoops(tiledNest1[0], tiledNest1[1]);
+
+    // resume the loop to band
+    band.clear();
+    getPerfectlyNestedLoops(band, tiledNest1[1]);
+    assert(band.size() == 7 && "number of tiled loops are incorrect.");
+  }
+
+  if (clUnroll) {
+    if (band.size() != 7) {
+      LLVM_DEBUG(llvm::dbgs() << "unroll must follows tiling"); 
+    }
+    if (failed(loopUnrollJamUpToFactor(band[6], mr))) {
+      llvm::errs() << "failed in unrolling mr\n";
+    }
+    if (failed(loopUnrollJamUpToFactor(band[5], nr))) {
+      llvm::errs() << "failed in unrolling nr\n";
+    }
+    // does not unroll the ki loop again, which is unrolled in uday's paper.
   }
 
   return;
