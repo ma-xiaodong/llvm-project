@@ -305,7 +305,7 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
       llvm::errs() << "failed in unrolling mr\n";
       return;
     }
-    if (failed(loopUnrollJamUpToFactor(band[5], 2))) {
+    if (failed(loopUnrollJamUpToFactor(band[5], nr))) {
       llvm::errs() << "failed in unrolling nr\n";
       return;
     }
@@ -360,7 +360,7 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     });
 
     copyNests.clear();
-    copyOptions.fastMemCapacityBytes = nr * kc * byteWidth;
+    copyOptions.fastMemCapacityBytes = kc * nr * byteWidth;
     affineDataCopyGenerate(band[2].getBody()->begin(),
                            std::prev(band[2].getBody()->end()),
                            copyOptions,

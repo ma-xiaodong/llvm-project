@@ -1078,7 +1078,6 @@ void mlir::scalarReplace(AffineForOp forOp) {
     if (isHoistableLoadStore(acc, forOp))
       isScalarReplacable[i] = true;
   }
-
   LLVM_DEBUG(llvm::dbgs() << accessSets.size() << " ITERATING 1st PHASE END\n");
 
   for (auto &en : llvm::enumerate(accessSets)) {
@@ -1131,8 +1130,47 @@ void mlir::scalarReplace(AffineForOp forOp) {
       continue;
     }
 
-    //OpBuilder b(forOp.getOperation());
+    OpBuilder b(forOp.getOperation());
+    Value singleEltMemRef = 
+         b.create<memref::AllocaOp>(forOp.getLoc(),
+                            MemRefType::get(/*shape=*/{1}, 
+                                            origMemrefType.getElementType()));
+    Value scalar = 
+          b.create<AffineLoadOp>(forOp.getLoc(), 
+                                 acc.memref, 
+                                 vMap.getAffineMap(), 
+                                 vMap.getOperands());
+    b.create<AffineStoreOp>(forOp.getLoc(), 
+                            scalar, 
+                            singleEltMemRef, 
+                            zeroIndex);
+    // Replace all load/stores of original memref with %singleEltMemRef[0].
+    SmallVector<AffineExpr, 1> resultExprs = {b.getAffineConstantExpr(0)};
+    for (const auto &acc : eqAccesses) {
+      if (failed(replaceAllMemRefUsesWith(acc.memref,
+                                          singleEltMemRef,
+                                          acc.opInst,
+                                          {},
+                                          AffineMap::get(origMemrefType.getRank(),
+                                                         0,
+                                                         resultExprs,
+                                                         b.getContext()),
+                                                         {},
+                                                         {}
+                                          )))
+        assert(false && "unimplemented escaping uses");
+    }
+    // re store singleEltMemRef to acc.memref
+    b.setInsertionPoint(forOp.getOperation()->getBlock(),
+                        std::next(Block::iterator(forOp.getOperation())));
+    scalar = b.create<AffineLoadOp>(forOp.getLoc(), singleEltMemRef, zeroIndex);
+    b.create<AffineStoreOp>(forOp.getLoc(), 
+                            scalar, 
+                            acc.memref,
+                            vMap.getAffineMap(), 
+                            vMap.getOperands());
   }
+  LLVM_DEBUG(llvm::dbgs() << "SCAL REP END\n");
 }
 
 /// Tiles the specified band of perfectly nested loops creating tile-space
