@@ -387,6 +387,7 @@ def HigherOrderPolyhedralOpt : FunctionPass<"hopt"> {
     Option<"clTile", "tile", "bool", /*default=*/"false", "Perform auto-tiling">,
     Option<"clUnroll", "unroll", "bool", /*default=*/"false", "Perform unroll and unroll-and-jam">,
     Option<"clCopy", "copy", "bool", /*default=*/"false", "Copy data from big area to small area">,
+    Option<"clScalRep", "scalrep", "bool", /*default=*/"false", "Perform scalar replacement">
   ];  
 }
 

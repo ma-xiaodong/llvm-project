@@ -163,6 +163,12 @@ Loops tile(ArrayRef<scf::ForOp> forOps, ArrayRef<Value> sizes,
 /// Returns the newly created intra-tile loops.
 Loops tilePerfectlyNested(scf::ForOp rootForOp, ArrayRef<Value> sizes);
 
+/// Replaces affine load and store accesses on memref's in `forOp' with accesses
+/// to a scalar or a single element memref in the case of loop passthroughs
+/// (scalars that are live out of a loop). Load/store accesses that are loop
+/// invariant are hoisted out of the loop when that's valid.
+void scalarReplace(AffineForOp forOp);
+
 /// Explicit copy / DMA generation options for mlir::affineDataCopyGenerate.
 struct AffineCopyOptions {
   // True if DMAs should be generated instead of point-wise copies.

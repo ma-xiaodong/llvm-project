@@ -956,6 +956,185 @@ mlir::tilePerfectlyNested(MutableArrayRef<AffineForOp> input,
   return success();
 }
 
+static bool mayBeEqual(const MemRefAccess &A, const MemRefAccess &B) {
+  if (A.memref != B.memref)
+    return false;
+
+  AffineValueMap diff, AMap, BMap;
+  A.getAccessMap(&AMap);
+  B.getAccessMap(&BMap);
+
+  LLVM_DEBUG(llvm::dbgs() << "AMap: \n" << AMap.getAffineMap() << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "BMap: \n" << BMap.getAffineMap() << "\n");
+
+  AffineValueMap::difference(AMap, BMap, &diff);
+  LLVM_DEBUG(llvm::dbgs() << "diff: \n" << diff.getAffineMap() << "\n");
+
+  return llvm::any_of(diff.getAffineMap().getResults(),
+                      [](AffineExpr e) {
+                        return !e.isa<AffineConstantExpr>();
+                      });
+}
+
+static bool isHoistableLoadStore(const MemRefAccess &acc, AffineForOp forOp) {
+  Value memref = acc.memref;
+
+  LLVM_DEBUG(llvm::dbgs() << "memref: " << memref << "\n");
+  if (memref.getDefiningOp() &&
+      memref.getDefiningOp()->getBlock() == forOp.getBody())
+    return false;
+
+  AffineValueMap vmap;
+  acc.getAccessMap(&vmap);
+  return llvm::find(vmap.getOperands(), forOp.getInductionVar()) == 
+         vmap.getOperands().end();
+}
+
+static bool isInnermostAffineForOp(AffineForOp forOp) {
+  bool isInnermost = true;
+  forOp.walk([&](AffineForOp thisForOp){
+    isInnermost = (forOp == thisForOp);
+    return WalkResult::interrupt();
+  });
+  return isInnermost;
+}
+
+// Replace memref with scalar
+void mlir::scalarReplace(AffineForOp forOp) {
+  if (!isInnermostAffineForOp(forOp))
+    return;
+
+  FuncOp f = forOp.getOperation()->getParentOfType<FuncOp>();
+  OpBuilder topBuilder(f.getBody());
+  Value zeroIndex = topBuilder.create<ConstantIndexOp>(f.getLoc(), 0);
+
+  std::vector<SmallVector<MemRefAccess, 4>> accessSets;
+  forOp.walk([&](Operation *op) {
+    if (!isa<AffineLoadOp, AffineStoreOp>(op))
+      return;
+
+    MemRefAccess acc(op);
+    const auto &en = 
+        std::find_if(accessSets.begin(), accessSets.end(),
+                     [&](const SmallVector<MemRefAccess, 4> &accList) {
+                       assert(!accList.empty() && "expected non-empty");
+                       return (accList.front() == acc);
+                     });
+    if (en != accessSets.end()) {
+      en->push_back(acc);
+    } else {
+      // Create a new group.
+      accessSets.emplace_back(SmallVector<MemRefAccess, 4>{acc});
+    }
+  });
+
+  // Determine which groups are replacable by scalars.
+  std::vector<bool> isScalarReplacable(accessSets.size(), false);
+  for (auto &en : llvm::enumerate(accessSets)) {
+    const auto &eqAccesses = en.value();
+    unsigned i = en.index();
+
+    assert(!eqAccesses.empty() && "equivalence class can't be empty");
+    auto sampleMemOp = eqAccesses.front();
+
+    MemRefAccess acc(sampleMemOp);
+
+    bool containStore = llvm::any_of(eqAccesses, [](const MemRefAccess &acc) {
+      return isa<AffineStoreOp>(acc.opInst);
+    });
+
+    if (!containStore)
+    {
+      if (llvm::any_of(accessSets, 
+                       [&](const SmallVector<MemRefAccess, 4> &accSet) 
+                       {
+                         if (llvm::all_of(accSet, 
+                                          [](const MemRefAccess &thisAcc) 
+                                          {
+                                            return !isa<AffineStoreOp>(thisAcc.opInst);
+                                          }))
+                         {
+                           return false;                           
+                         }
+                         return mayBeEqual(accSet.front(), acc);
+                       }))
+      {
+        continue;
+      }
+      isScalarReplacable[i] = true;
+      continue;
+    }
+
+    // If one of the ops is a store
+    if (llvm::any_of(accessSets,
+                     [&](SmallVector<MemRefAccess, 4> &accSet) 
+                     {
+                       return mayBeEqual(accSet.front(), acc);
+                     })) 
+    {
+      continue;
+    }
+
+    if (isHoistableLoadStore(acc, forOp))
+      isScalarReplacable[i] = true;
+  }
+
+  LLVM_DEBUG(llvm::dbgs() << accessSets.size() << " ITERATING 1st PHASE END\n");
+
+  for (auto &en : llvm::enumerate(accessSets)) {
+    if (!isScalarReplacable[en.index()])
+      continue;
+
+    const auto &eqAccesses = en.value();
+
+    // find the op that dominates others at the front
+    auto *firstMemOp =
+         std::min_element(eqAccesses.begin(), eqAccesses.end(),
+                          [](const MemRefAccess &a, const MemRefAccess &b) {
+                            return a.opInst->isBeforeInBlock(b.opInst);
+                          })->opInst;
+
+    MemRefAccess acc(firstMemOp);
+    AffineValueMap vMap;
+    acc.getAccessMap(&vMap);
+
+    MemRefType origMemrefType = acc.memref.getType().cast<MemRefType>();
+
+    bool containsStore = llvm::any_of(eqAccesses, [](const MemRefAccess &acc) {
+      return isa<AffineStoreOp>(acc.opInst);
+    });
+
+    if (!containsStore) {
+      // All ops in this equivalence class are loads
+      Value scalar;
+      bool hoistable = isHoistableLoadStore(acc, forOp);
+      if (hoistable) {
+        SmallVector<Value, 4> operands;
+        operands.reserve(1 + vMap.getNumOperands());
+        operands.push_back(acc.memref);
+        operands.append(vMap.getOperands().begin(), vMap.getOperands().end());
+        OpBuilder b(forOp.getOperation());
+        scalar = b.create<AffineLoadOp>(forOp.getLoc(), vMap.getAffineMap(),
+                                        operands);
+      } else {
+        scalar = cast<AffineLoadOp>(firstMemOp).getResult();
+      }
+
+      for (auto it = hoistable ? eqAccesses.begin()
+                               : std::next(eqAccesses.begin());
+           it != eqAccesses.end();
+           it++) {
+        auto loadOp = cast<AffineLoadOp>((*it).opInst);
+        loadOp.getResult().replaceAllUsesWith(scalar);
+        loadOp.erase();
+      }
+      continue;
+    }
+
+    //OpBuilder b(forOp.getOperation());
+  }
+}
+
 /// Tiles the specified band of perfectly nested loops creating tile-space
 /// loops and intra-tile loops, using SSA values as tiling parameters. A band
 /// is a contiguous set of loops.

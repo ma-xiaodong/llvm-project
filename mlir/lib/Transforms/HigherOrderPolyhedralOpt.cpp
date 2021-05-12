@@ -128,8 +128,8 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
 
       if (diff > tmpDiff) {
         mr = tmpMr;
-	    nr = tmpNr;
-	    diff = tmpDiff;
+        nr = tmpNr;
+        diff = tmpDiff;
       }
     }
   }
@@ -165,6 +165,16 @@ void HigherOrderPolyhedralOpt::runOnFunction() {
 
   for (auto &block : func) {
     runOnBlock(&block);
+  }
+  {
+    auto *context = &getContext();
+    OwningRewritePatternList patterns(context);
+    AffineLoadOp::getCanonicalizationPatterns(patterns, context);
+    AffineStoreOp::getCanonicalizationPatterns(patterns, context);
+    AffineApplyOp::getCanonicalizationPatterns(patterns, context);
+    if (failed(applyPatternsAndFoldGreedily(func, std::move(patterns)))) {
+      llvm::errs() << "error in applyPatternsAndFoldGreedily\n";
+    }
   }
 }
 
@@ -295,7 +305,7 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
       llvm::errs() << "failed in unrolling mr\n";
       return;
     }
-    if (failed(loopUnrollJamUpToFactor(band[5], nr))) {
+    if (failed(loopUnrollJamUpToFactor(band[5], 2))) {
       llvm::errs() << "failed in unrolling nr\n";
       return;
     }
@@ -317,9 +327,9 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     copyOptions.fastMemCapacityBytes = mc * kc * byteWidth; 
     affineDataCopyGenerate(band[1].getBody()->begin(),
                            std::prev(band[1].getBody()->end()),
-			   copyOptions,
-			   lhsMemRef,
-			   copyNests);
+                           copyOptions,
+                           lhsMemRef,
+                           copyNests);
 
     // band[0] is the loop of ko, allocate and copy memory of size kc * N of 
     // matrix B in L3.
@@ -332,10 +342,10 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     }
     copyNests.clear();
     affineDataCopyGenerate(band[0].getBody()->begin(),
-                           std::prev(band[0].getBody()->end()),
-			   copyOptions,
-			   rhsMemRef,
-			   copyNests);
+                           std::prev(band[0].getBody()->end()), 
+                           copyOptions,
+                           rhsMemRef,
+                           copyNests);
 
     // band[2] is the loop of ji, allocate and copy memory of size nr * kc of
     // matrix B in L1, which is a subblock of matrix B in L3, so we need to find
@@ -353,13 +363,16 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     copyOptions.fastMemCapacityBytes = nr * kc * byteWidth;
     affineDataCopyGenerate(band[2].getBody()->begin(),
                            std::prev(band[2].getBody()->end()),
-			   copyOptions,
-			   rhsL3Buf,
-			   copyNests);
+                           copyOptions,
+                           rhsL3Buf,
+                           copyNests);
 
     // TODO: Set alignment to 256-bit boundaries
   }
 
+  if (clScalRep) {
+    block->walk([&](AffineForOp forOp) { scalarReplace(forOp); });
+  }
   return;
 }
 
