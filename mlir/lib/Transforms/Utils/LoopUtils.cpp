@@ -2947,9 +2947,7 @@ uint64_t mlir::affineDataCopyGenerate(Block::iterator begin,
   // replaced with.
   DenseMap<Value, Value> fastBufferMap;
 
-  // To check for errors when walking the block.
   bool error = false;
-
   // Walk this range of operations  to gather all memory regions.
   block->walk(begin, end, [&](Operation *opInst) {
     // Gather regions to allocate to buffers in faster memory space.
@@ -3101,6 +3099,126 @@ uint64_t mlir::affineDataCopyGenerate(Block::iterator begin,
   }
 
   return totalCopyBuffersSizeInBytes;
+}
+
+static bool isAccessIndexInvariant(Value iv, Value index) {
+  assert(isForInductionVar(iv) && "iv must be a AffineForOp");
+  assert(index.getType().isa<IndexType>() && "index must be of IndexType");
+  SmallVector<Operation *, 4> affineApplyOps;
+  getReachableAffineApplyOps({index}, affineApplyOps);
+
+  if (affineApplyOps.empty()) {
+    return index != iv;
+  }
+
+  if (affineApplyOps.size() > 1) {
+    affineApplyOps[0]->emitRemark("CompositionAffineMapsPass must have been "
+                                  "run: there should be at most one "
+                                  "AffineApplyOp, returning false conservatively.");
+    return false;
+  }
+  auto composeOp = cast<AffineApplyOp>(affineApplyOps[0]);
+  return !composeOp.getAffineValueMap().isFunctionOf(0, iv);
+}
+
+template <typename LoadOrStoreOp>
+bool mlir::isInvariantAccess(LoadOrStoreOp memOp, AffineForOp forOp) {
+  for (auto operand : memOp.getMapOperands()) {
+    if (!isAccessIndexInvariant(forOp.getInductionVar(), operand)) {
+      return false;
+    }
+  }
+
+  DenseSet<Operation *> depForOps;
+  for (auto &use : forOp.getInductionVar().getUses()) {
+    if (auto depForOp = dyn_cast<AffineForOp>(use.getOwner()))
+      depForOps.insert(depForOp.getOperation());
+  }
+
+  for (auto depForOp : depForOps) {
+    if (!isInvariantAccess(memOp, cast<AffineForOp>(depForOp)))
+      return false;
+  }
+  return true;
+}
+
+LogicalResult mlir::loopVectorize(AffineForOp forOp, unsigned simdWidth,
+                                  DenseMap<Value, Value> *vecMemRefMap) {
+  LLVM_DEBUG(llvm::dbgs() << "Vectorizing " << *forOp << "\n");
+
+  DenseSet<Operation *> toVecLoadOps, toVecStoreOps;
+  SmallVector<Operation *, 4> toSplatLoadOps, writeLastEltStoreOps;
+
+  DenseMap<Value, Value> toVecMemRefMap;
+  SetVector<Value> toVecMemRefs;
+
+  forOp.walk([&](Operation *op) {
+    auto loadOp = dyn_cast<AffineLoadOp>(op);
+    auto storeOp = dyn_cast<AffineStoreOp>(op);
+    if (!loadOp && !storeOp)
+      return WalkResult::advance();
+
+    bool isInvariant = loadOp ? isInvariantAccess(loadOp, forOp)
+                              : isInvariantAccess(storeOp, forOp);
+    if (isInvariant) {
+      if (loadOp)
+        toSplatLoadOps.push_back(loadOp);
+      else
+        writeLastEltStoreOps.push_back(storeOp);
+      return WalkResult::advance();
+    }
+
+    Value memref = loadOp ? loadOp.getMemRef() : storeOp.getMemRef();
+
+    if (loadOp)
+      toVecLoadOps.insert(loadOp);
+    else
+      toVecStoreOps.insert(storeOp);
+
+    if (toVecMemRefs.count(memref) == 0)
+      toVecMemRefs.insert(memref);
+
+    return WalkResult::advance();
+  });
+
+  if (toVecMemRefs.empty()) {
+    LLVM_DEBUG(llvm::dbgs() << "No memrefs to vectorize\n");
+    return failure();
+  }
+
+  // Compute the width for vectorization.
+  int vectorWidth = -1;
+  for (auto memref : toVecMemRefs) {
+    auto memrefType = memref.getType().cast<MemRefType>();
+    auto eltType = memrefType.getElementType();
+    if (eltType.isa<VectorType>()) {
+      LLVM_DEBUG(llvm::dbgs() << "code already vectorized?\n");
+      return failure();
+    }
+
+    if (simdWidth % eltType.getIntOrFloatBitWidth() != 0) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "scalar width does not divide h/w vector width\n");
+      return failure();
+    }
+    unsigned thisVectorWidth = simdWidth / eltType.getIntOrFloatBitWidth();
+    if (vectorWidth == -1) {
+      vectorWidth = thisVectorWidth;
+    } else {
+      if (std::max<unsigned>(vectorWidth, thisVectorWidth) %
+              std::min<unsigned>(vectorWidth, thisVectorWidth) !=
+          0) {
+        LLVM_DEBUG(llvm::dbgs() << "Different memrefs require widths that "
+                                   "aren't multiples of each other\n");
+        return failure();
+      }
+      vectorWidth = std::min<unsigned>(vectorWidth, thisVectorWidth);
+    }
+  }
+
+  assert(vectorWidth > 0 && "valid vector width should have been found\n");
+  LLVM_DEBUG(llvm::dbgs() << "Using vector width: " << vectorWidth << "\n");
+
 }
 
 // A convenience version of affineDataCopyGenerate for all ops in the body of

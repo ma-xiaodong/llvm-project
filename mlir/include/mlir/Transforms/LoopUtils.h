@@ -206,6 +206,9 @@ uint64_t affineDataCopyGenerate(AffineForOp forOp,
                                 Optional<Value> filterMemRef,
                                 DenseSet<Operation *> &copyNests);
 
+template <typename LoadOrStoreOp>
+bool isInvariantAccess(LoadOrStoreOp memOp, AffineForOp forOp);
+
 /// Result for calling generateCopyForMemRegion.
 struct CopyGenerateResult {
   // Number of bytes used by alloc.
@@ -243,6 +246,10 @@ TileLoops extractFixedOuterLoops(scf::ForOp rootFOrOp, ArrayRef<int64_t> sizes);
 /// `loops` contains a list of perfectly nested loops with bounds and steps
 /// independent of any loop induction variable involved in the nest.
 void coalesceLoops(MutableArrayRef<scf::ForOp> loops);
+
+LogicalResult loopVectorize(AffineForOp forOp,
+                            unsigned simdWidth,
+                            DenseMap<Value, Value> *vecMemRefs = nullptr);
 
 /// Take the ParallelLoop and for each set of dimension indices, combine them
 /// into a single dimension. combinedDimensions must contain each index into
