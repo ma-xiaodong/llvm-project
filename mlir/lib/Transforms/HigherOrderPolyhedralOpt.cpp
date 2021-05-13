@@ -149,6 +149,8 @@ static SmallVector<unsigned, 4> computeTileSize(AffineForOp *forOp) {
   if (mc < mr) {
     // this condition looks impossible
     mc = mr;
+  } else {
+    mc = (mc / mr) * mr;
   }
   assert(mc <= M && "M is too small");
 
@@ -181,8 +183,6 @@ void HigherOrderPolyhedralOpt::runOnFunction() {
 void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
   StringAttr polyClass;
   SmallVector<AffineForOp, 7> band;
-  // find the memref of matrix A, B, C
-  Value outputMemRef, lhsMemRef, rhsMemRef;
   // the tile size
   unsigned kc, mc, mr, nr;
 
@@ -204,25 +204,6 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     return;
   }
   assert(band.size() == 3 && "matmul has at most 3 loops");
-
-  OpBuilder builder(band[0]);
-
-  band[2].walk([&](AffineStoreOp storeOp){
-    outputMemRef = storeOp.getMemRef();
-  });
-  band[2].walk([&](AffineLoadOp loadOp){
-    if (outputMemRef == loadOp.getMemRef()) {
-      return;
-    }
-    rhsMemRef = loadOp.getMemRef();
-  });
-  band[2].walk([&](AffineLoadOp loadOp){
-    if (loadOp.getMemRef() == outputMemRef || loadOp.getMemRef() == rhsMemRef) {
-      return;
-    }
-    lhsMemRef = loadOp.getMemRef();
-  });
-
 
   // Tiling the loops in matrix multiplication
   if (clTile) {
@@ -297,22 +278,26 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     assert(band.size() == 7 && "number of tiled loops are incorrect.");
   }
 
-  if (clUnroll) {
-    if (band.size() != 7) {
-      LLVM_DEBUG(llvm::dbgs() << "unroll must follows tiling"); 
-    }
-    if (failed(loopUnrollJamUpToFactor(band[6], mr))) {
-      llvm::errs() << "failed in unrolling mr\n";
-      return;
-    }
-    if (failed(loopUnrollJamUpToFactor(band[5], nr))) {
-      llvm::errs() << "failed in unrolling nr\n";
-      return;
-    }
-    // does not unroll the ki loop again, which is unrolled in uday's paper.
-  }
-
   if (clCopy) {
+    // find the memref of matrix A, B, C
+    Value outputMemRef, lhsMemRef, rhsMemRef;
+  
+    band[6].walk([&](AffineStoreOp storeOp){
+      outputMemRef = storeOp.getMemRef();
+    });
+    band[6].walk([&](AffineLoadOp loadOp){
+      if (outputMemRef == loadOp.getMemRef()) {
+        return;
+      }
+      rhsMemRef = loadOp.getMemRef();
+    });
+    band[6].walk([&](AffineLoadOp loadOp){
+      if (loadOp.getMemRef() == outputMemRef || loadOp.getMemRef() == rhsMemRef) {
+        return;
+      }
+      lhsMemRef = loadOp.getMemRef();
+    });
+
     unsigned byteWidth = lhsMemRef.getType().cast<MemRefType>().
                                    getElementType().getIntOrFloatBitWidth() / 8;
     AffineCopyOptions copyOptions = {false,
@@ -340,6 +325,7 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
       llvm::errs() << "error in the k loop of matrix B\n";
       return;
     }
+
     copyNests.clear();
     affineDataCopyGenerate(band[0].getBody()->begin(),
                            std::prev(band[0].getBody()->end()), 
@@ -368,6 +354,21 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
                            copyNests);
 
     // TODO: Set alignment to 256-bit boundaries
+  }
+
+  if (clUnroll) {
+    if (band.size() != 7) {
+      LLVM_DEBUG(llvm::dbgs() << "unroll must follows tiling"); 
+    }
+    if (failed(loopUnrollJamUpToFactor(band[6], mr))) {
+      llvm::errs() << "failed in unrolling mr\n";
+      return;
+    }
+    if (failed(loopUnrollJamUpToFactor(band[5], nr))) {
+      llvm::errs() << "failed in unrolling nr\n";
+      return;
+    }
+    // does not unroll the ki loop again, which is unrolled in uday's paper.
   }
 
   if (clScalRep) {
