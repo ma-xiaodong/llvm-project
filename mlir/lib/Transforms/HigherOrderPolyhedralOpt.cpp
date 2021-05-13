@@ -10,6 +10,7 @@
 #include "mlir/Transforms/LoopUtils.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/Utils.h"
+#include "llvm/Support/WithColor.h"
 #include "llvm/Support/Debug.h"
 
 #include <sstream>
@@ -278,26 +279,52 @@ void HigherOrderPolyhedralOpt::runOnBlock(Block *block) {
     assert(band.size() == 7 && "number of tiled loops are incorrect.");
   }
 
-  if (clCopy) {
-    // find the memref of matrix A, B, C
-    Value outputMemRef, lhsMemRef, rhsMemRef;
+  // find the memref of matrix A, B, C
+  Value outputMemRef, lhsMemRef, rhsMemRef;
   
+  band[6].walk([&](AffineStoreOp storeOp){
+    outputMemRef = storeOp.getMemRef();
+  });
+  band[6].walk([&](AffineLoadOp loadOp){
+    if (outputMemRef == loadOp.getMemRef()) {
+      return;
+    }
+    rhsMemRef = loadOp.getMemRef();
+  });
+  band[6].walk([&](AffineLoadOp loadOp){
+    if (loadOp.getMemRef() == outputMemRef || loadOp.getMemRef() == rhsMemRef) {
+      return;
+    }
+    lhsMemRef = loadOp.getMemRef();
+  });
+
+  if (clVect && band.size() == 7) {
+    Value outputMemRef;
+
     band[6].walk([&](AffineStoreOp storeOp){
       outputMemRef = storeOp.getMemRef();
     });
-    band[6].walk([&](AffineLoadOp loadOp){
-      if (outputMemRef == loadOp.getMemRef()) {
-        return;
-      }
-      rhsMemRef = loadOp.getMemRef();
-    });
-    band[6].walk([&](AffineLoadOp loadOp){
-      if (loadOp.getMemRef() == outputMemRef || loadOp.getMemRef() == rhsMemRef) {
-        return;
-      }
-      lhsMemRef = loadOp.getMemRef();
-    });
 
+    if (!outputMemRef.getType().cast<MemRefType>()
+        .getElementType().isa<VectorType>()) {
+      // if it has not been vectorized
+      DenseMap<Value, Value> vecMemRefMap;
+
+      if (succeeded(loopVectorize(band[5], /*simdWidth=*/256, &vecMemRefMap))) {
+        assert(vecMemRefMap.count(rhsMemRef) > 0 && "rhs vec memref not found");
+        assert(vecMemRefMap.count(outputMemRef) > 0 && "output vec memref not found");
+
+        rhsMemRef = vecMemRefMap[rhsMemRef];
+        outputMemRef = vecMemRefMap[outputMemRef];
+      }
+
+    }
+  }
+  else if (band.size() != 7) {
+    llvm::WithColor::warning(llvm::errs()) << "can not vectorize loops\n";
+  }
+
+  if (clCopy) {
     unsigned byteWidth = lhsMemRef.getType().cast<MemRefType>().
                                    getElementType().getIntOrFloatBitWidth() / 8;
     AffineCopyOptions copyOptions = {false,
