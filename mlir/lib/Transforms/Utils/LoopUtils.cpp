@@ -24,6 +24,7 @@
 #include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IntegerSet.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Support/MathExtras.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/RegionUtils.h"
@@ -3142,6 +3143,122 @@ bool mlir::isInvariantAccess(LoadOrStoreOp memOp, AffineForOp forOp) {
   return true;
 }
 
+static void getNonIndexLiveInScalars(AffineForOp forOp,
+                                     SmallVectorImpl<Value> &scalars) {
+  SmallVector<AffineForOp, 4> ivs;
+  forOp.walk([&](Operation *op) {
+    for (auto value : op->getOperands()) {
+      auto type = value.getType();
+      if (type.isa<MemRefType, IndexType>())
+        continue;
+      if (auto *defOp = value.getDefiningOp()) {
+        ivs.clear();
+        // Check whether the defining op is outside iv.
+        getLoopIVs(*defOp, &ivs);
+        if (llvm::find(ivs, forOp) == ivs.end())
+          scalars.push_back(value);
+      } else {
+        scalars.push_back(value);
+      }
+    }
+  });
+}
+
+/// Given an input type, provides a vector type for it of the provided width.
+static VectorType getVectorizedType(Type inputType, unsigned width) {
+  assert(width > 1 && "unexpected vector width");
+  assert(!inputType.isa<IndexType>() && "index type can't be vectorized");
+  Type baseEltType = inputType;
+  SmallVector<int64_t, 4> vecShape;
+  if (auto vecEltType = inputType.dyn_cast<VectorType>()) {
+    baseEltType = vecEltType.getElementType();
+    vecShape.reserve(vecShape.size() + vecEltType.getRank());
+    vecShape.assign(vecEltType.getShape().begin(), vecEltType.getShape().end());
+  }
+  vecShape.push_back(width);
+  return VectorType::get(vecShape, baseEltType);
+}
+
+/// Casts a given input memref, uses memref_shape_cast op to cast it to a memref
+/// with an elemental type that is `vector width` times (for eg., f32 becomes
+/// vector<8xf32>, vector<8xf32> becomes vector<8x8xf32> if `vectorWidth` were
+/// to be 8).
+static Value createVectorMemRef(Value scalMemRef, unsigned vectorWidth) {
+  auto scalMemRefType = scalMemRef.getType().cast<MemRefType>();
+  auto shape = scalMemRefType.getShape();
+
+  OpBuilder b(scalMemRef.getContext());
+  if (auto *defOp = scalMemRef.getDefiningOp())
+    b.setInsertionPointAfter(defOp);
+  else
+    b.setInsertionPointToStart(scalMemRef.cast<BlockArgument>().getOwner());
+
+  auto vecMemRefEltType =
+      getVectorizedType(scalMemRefType.getElementType(), vectorWidth);
+
+  SmallVector<int64_t, 4> vecMemRefShape(shape.begin(), shape.end());
+  if (vecMemRefShape.back() != -1)
+    vecMemRefShape.back() /= vectorWidth;
+
+  auto vecMemRefType = MemRefType::get(vecMemRefShape, vecMemRefEltType);
+
+  return b.create<MemRefShapeCastOp>(b.getUnknownLoc(), vecMemRefType, scalMemRef);
+}
+
+/// Vectorize any operation other than AffineLoadOp, AffineStoreOp,
+/// and splat op. Operands of the op should have already been vectorized. The op
+/// can't have any regions.
+static Operation *vectorizeMiscLeafOp(Operation *op, unsigned width) {
+  // Sanity checks.
+  assert(!isa<AffineLoadOp>(op) &&
+         "all loads should have already been fully vectorized");
+  assert(!isa<AffineStoreOp>(op) &&
+         "all stores should have already been fully vectorized");
+
+  if (op->getNumRegions() != 0)
+    return nullptr;
+
+  LLVM_DEBUG(llvm::dbgs() << "Vectorizing leaf op " << *op << "\n");
+
+  SmallVector<Type, 8> vectorTypes;
+  for (auto v : op->getResults())
+    vectorTypes.push_back(getVectorizedType(v.getType(), width));
+
+  // Check whether any operand is null; if so, vectorization failed.
+  bool success = llvm::all_of(
+      op->getOperands(), [](Value v) { return v.getType().isa<VectorType>(); });
+  if (!success) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "\n[affine-vect]+++++ operands should've been vectorized\n"); 
+    return nullptr;
+  }
+
+  OpBuilder b(op);
+  OperationState newOp(op->getLoc(), op->getName().getStringRef(),
+                       op->getOperands(), vectorTypes, op->getAttrs(),
+                       /*successors=*/{},
+                       /*regions=*/{});
+  return b.createOperation(newOp);
+}
+
+/// Returns an affine map with the last result of `input' scaled down by
+/// `factor'.
+static AffineMap scaleDownLastResult(AffineMap input, int64_t factor) {
+  SmallVector<AffineExpr, 4> results(input.getResults().begin(),
+                                     input.getResults().end());
+  results.back() = results.back().floorDiv(factor);
+  return AffineMap::get(input.getNumDims(), input.getNumSymbols(), results,
+                        input.getContext());
+}
+
+void replaceAllUsesExcept(Value orig, Value replacement,
+                          const SmallPtrSetImpl<Operation *> &exceptions) {
+  for (auto &use : llvm::make_early_inc_range(orig.getUses())) {
+    if (exceptions.count(use.getOwner()) == 0)
+      use.set(replacement);
+  }
+}
+
 LogicalResult mlir::loopVectorize(AffineForOp forOp, unsigned simdWidth,
                                   DenseMap<Value, Value> *vecMemRefMap) {
   LLVM_DEBUG(llvm::dbgs() << "Vectorizing " << *forOp << "\n");
@@ -3219,6 +3336,111 @@ LogicalResult mlir::loopVectorize(AffineForOp forOp, unsigned simdWidth,
   assert(vectorWidth > 0 && "valid vector width should have been found\n");
   LLVM_DEBUG(llvm::dbgs() << "Using vector width: " << vectorWidth << "\n");
 
+  if (getLargestDivisorOfTripCount(forOp) % vectorWidth != 0) {
+    LLVM_DEBUG(llvm::dbgs() << "Trip count not known to be a multiple of vector width\n");
+    return failure();
+  }
+
+  // Check if all live-in scalars are of non-memref/vector/tensor/index type
+  SmallVector<Value, 4> liveInScalars;
+  getNonIndexLiveInScalars(forOp, liveInScalars);
+  if (llvm::any_of(liveInScalars, [](Value v) {
+                                    auto type = v.getType();
+                                    return type.isa<VectorType, TensorType, IndexType>();
+                                  }
+  )) {
+    LLVM_DEBUG(llvm::dbgs() << "Non-scalar type live in - can't splat\n");
+    return failure();
+  }
+
+  for (auto vecMemRef : toVecMemRefs) {
+    toVecMemRefMap.insert({vecMemRef, createVectorMemRef(vecMemRef, vectorWidth)});
+  }
+
+  // Turn the load into a load on its vector memref cast, and scale down the 
+  // last access by vector width.
+  for (auto *op : toVecLoadOps) {
+    auto loadOp = cast<AffineLoadOp>(op);
+    OpBuilder rewriter(loadOp);
+    auto vecLoadOp = 
+         rewriter.create<AffineLoadOp>(loadOp.getLoc(),
+                                       toVecMemRefMap[loadOp.getMemRef()],
+                                       scaleDownLastResult(loadOp.getAffineMap(), vectorWidth),
+                                       loadOp.getMapOperands());
+    loadOp.getOperation()->replaceAllUsesWith(vecLoadOp);
+    loadOp.erase();
+  }
+
+  // Splat invariant load ops.
+  for (auto *op : toSplatLoadOps) {
+    auto loadOp = cast<AffineLoadOp>(op);
+    OpBuilder rewriter(loadOp.getContext());
+    rewriter.setInsertionPointAfter(loadOp);
+    auto splat = 
+         rewriter.create<SplatOp>(loadOp.getLoc(),
+                                  getVectorizedType(loadOp.getMemRefType().getElementType(), 
+                                                    vectorWidth),
+                                  loadOp.getResult());
+    SmallPtrSet<Operation *, 1> exceptions = {splat};
+    replaceAllUsesExcept(loadOp, splat, exceptions);
+  }
+
+  // Vectorize store ops with the loop being vectorized
+  for (auto *op : toVecStoreOps) {
+    auto storeOp = cast<AffineStoreOp>(op);
+    OpBuilder rewriter(storeOp);
+    rewriter.create<AffineStoreOp>(
+        storeOp.getLoc(), storeOp.getValueToStore(),
+        toVecMemRefMap[storeOp.getMemRef()],
+        scaleDownLastResult(storeOp.getAffineMap(), vectorWidth),
+        storeOp.getMapOperands());
+    storeOp.erase();
+  }
+
+  // Splat live-in scalars.
+  for (auto scalar : liveInScalars) {
+    OpBuilder rewriter(scalar.getContext());
+    Location loc = rewriter.getUnknownLoc();
+    if (auto *defOp = scalar.getDefiningOp()) {
+      loc = defOp->getLoc();
+      rewriter.setInsertionPointAfter(defOp);
+    } else {
+      auto *block = scalar.cast<BlockArgument>().getOwner();
+      loc = block->getParentOp()->getLoc();
+      rewriter.setInsertionPointToStart(block);
+    }
+    auto splat = rewriter.create<SplatOp>(
+        loc, scalar, getVectorizedType(scalar.getType(), vectorWidth));
+    replaceAllUsesInRegionWith(scalar, splat, forOp.region());
+  }
+
+  // Vectorize remaining ops.
+  forOp.walk([&](Operation *op) {
+    if (isa<AffineLoadOp, AffineStoreOp, AffineApplyOp, SplatOp, AffineYieldOp>(
+            op))
+      return;
+    if (auto *vecOp = vectorizeMiscLeafOp(op, vectorWidth)) {
+      op->replaceAllUsesWith(vecOp);
+      if (op->use_empty())
+        op->erase();
+    }
+  });
+
+  assert(writeLastEltStoreOps.empty() && "unimplemented last write store ops");
+  // Set the step.
+  forOp.setStep(forOp.getStep() * vectorWidth); 
+
+  auto *context = forOp.getContext();
+  OwningRewritePatternList patterns(context);
+  AffineForOp::getCanonicalizationPatterns(patterns, context);
+  AffineLoadOp::getCanonicalizationPatterns(patterns, context);
+  AffineStoreOp::getCanonicalizationPatterns(patterns, context);
+  applyPatternsAndFoldGreedily(forOp->getParentOfType<FuncOp>(), std::move(patterns));
+
+  if (vecMemRefMap)
+    *vecMemRefMap = std::move(toVecMemRefMap);
+                                                                               
+  return success();
 }
 
 // A convenience version of affineDataCopyGenerate for all ops in the body of
