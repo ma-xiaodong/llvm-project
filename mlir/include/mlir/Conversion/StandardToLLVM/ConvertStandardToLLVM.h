@@ -516,6 +516,9 @@ protected:
   /// convertible to LLVM.
   bool isConvertibleAndHasIdentityMaps(MemRefType type) const;
 
+  /// Returns if the givem memref type is supported.
+  bool isSupportedMemRefType(MemRefType type) const;
+
   /// Returns the type of a pointer to an element of the memref.
   Type getElementPtrType(MemRefType type) const;
 
